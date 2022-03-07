@@ -1,91 +1,129 @@
 import struct
+from typing import List, Tuple, BinaryIO
 
 
-def ftob(f: float):
-    #return int.to_bytes(int.from_bytes(struct.pack('<f', f), byteorder='little'))
+def main(infiles: List[str], outfile: str, n: int) -> None:
+    size_x, size_y = None, None
+    with open(outfile, 'wb') as ntf:
+        for i in range(n):
+            print(f'processing file {i+1}/{n}')
+            with open(infiles[i], 'rb') as jxf:
+                if i == 0:
+                    print(f'=> reading and parsing .jxf header')
+                    jxf_header = jxf.read(56)
+                    ntf_header, size_x, size_y = construct_ntf_header(jxf_header, n)
+                    print(f'=> matrix dimensions: {size_x=}, {size_y=}')
+                    print('=> writing .ntf header')
+                    ntf.write(ntf_header)
+
+                # write one row of data at a time
+                jxf.seek(56)
+                print(
+                    '=> converting big endian .jxf data to little endian,',
+                    'writing little endian data to .ntf file'
+                )
+                for row in range(size_y):
+                    data = jxf.read(size_x * 4)
+                    ntf.seek(128 + 4 * (row*size_x*n + i*size_x))
+                    data = convert_block_to_little_endian(data, size_x)
+                    ntf.write(data)
+
+
+def construct_ntf_data(jxf: BinaryIO, size_x: int, size_y: int) -> bytearray:
+    # 32bits = 4 bytes
+    jxf.seek(56)
+    big_endian_bytes = jxf.read(size_x * size_y * 4)
+    data = []
+    for i in range(size_x * size_y):
+        data += itob(btoi(big_endian_bytes[4*i:4*i+4]))
+    return bytearray(data)
+
+
+def construct_ntf_header(jxf_header: bytes, n: int) -> Tuple[bytes, int, int]:
+    # See below link for .jxf file header spec:
+    # https://cycling74.com/sdk/max-sdk-8.2.0/chapter_jit_jxf.html#chapter_jit_jxf_api
+    assert jxf_header[36:40] == b'FL32', 'matrix is not in float32 format'
+    assert btoi(jxf_header[40:44]) == 1, 'matrix does not have planes == 1'
+    assert btoi(jxf_header[44:48]) == 2, 'matrix is not 2-dimensional'
+    assert btoi(jxf_header[48:52]) == btoi(jxf_header[52:56]), 'matrix rows != cols'
+
+    size_x = btoi(jxf_header[48:52])
+    size_y = btoi(jxf_header[52:56])
+
+    # ntf file header
+    bytes_arr = [
+        *itob(0),           # 0x00  ByteOrder: 1 = little endian
+        *itob(1),           # 0x04  VersionNumber: 1 = Reaktor 5+?
+        *itob(1),           # 0x08  ArrayFormat: 1 = Float32Bits
+        *itob(1),           # 0x0C  ???, default = 1
+        *itob(size_x * n),  # 0x10  dx: X size (horizontal)
+        *itob(size_y),      # 0x14  dy: Y size (vertical)
+        *ftob(0),           # 0x18  Min: Value Property, default = 0.0
+        *ftob(1),           # 0x1C  Max: Value Property, default = 1.0
+        *ftob(0),           # 0x20  StepSize: Value Property, default = 0.0
+        *ftob(0),           # 0x24  Default: Value Property, default = 0.0
+        *itob(0),           # 0x28  DisplayFormat
+        *itob(0),           # 0x2C  DefaultValueColor
+        *itob(0),           # 0x30  MinValueColor
+        *itob(0),           # 0x34  MaxValueColor
+        *itob(0),           # 0x38  X-Units: 0=Index, 1=[0...1], 2=ms, 3=tempo ticks
+        *ftob(48000),       # 0x3C  X-SamplesPerSecond
+        *ftob(120),         # 0x40  X-BPM: default = 120.0
+        *ftob(1),           # 0x44  X-SamplesPerTick: default = 1.0
+        *itob(24),          # 0x48  X-TicksPerBeat: default = 24
+        *itob(4),           # 0x4C  X-BeatsPerBar: default = 4
+        *ftob(0),           # 0x50  X-Offset: default = 0.0
+        *ftob(1),           # 0x54  X-CustomRange: default = 1.0
+        *ftob(1),           # 0x58  X-CustomRatio: default = 1.0
+        *itob(0),           # 0x5C  Y-Units: 0=Index, 1=[0...1]
+        *ftob(48),          # 0x60  Y-SamplesPerSecond, default = 48.0
+        *ftob(120),         # 0x64  Y-BPM: default = 120.0
+        *ftob(1),           # 0x68  Y-SamplesPerTick: default = 1.0
+        *itob(24),          # 0x6C  Y-TicksPerBeat: default = 24
+        *itob(4),           # 0x70  Y-BeatsPerBar: default = 4
+        *ftob(0),           # 0x74  Y-Offset: default = 0.0
+        *ftob(1),           # 0x78  Y-CustomRange: default = 1.0
+        *ftob(1),           # 0x7C  Y-CustomRatio: default = 1.0
+    ]
+    return bytearray(bytes_arr), size_x, size_y
+
+
+def convert_block_to_little_endian(
+    big_endian_bytes: bytes,
+    size_in_bytes: int,
+) -> bytearray:
+    data = bytearray(big_endian_bytes)
+    for i in range(size_in_bytes):
+        big = data[4*i : 4*(i+1)]
+        little = btoi(big).to_bytes(4, byteorder='little')
+        data[4*i : 4*(i+1)] = little
+    return data
+
+
+def ftob(f: float) -> struct:
     return struct.pack('<f', f)
 
 
-def itob(i: int):
+def itob(i: int) -> List[bytes]:
     return [*i.to_bytes(4, byteorder='little')]
 
 
-def btoi(b: bytes):
+def btoi(b: bytes) -> int:
     return int.from_bytes(b, byteorder='big')
 
 
-def main(infile, outfile):
-    # 32bits = 4 bytes
-    with open(infile, 'rb') as f:
-        header = f.read(48)
-        assert header[36:40] == b'FL32'
-        assert btoi(header[40:44]) == 1
-        assert btoi(header[44:48]) == 2
-        dims = btoi(header[44:48])
-        dims = f.read(dims * 4)
-        assert btoi(dims[0:4]) == btoi(dims[4:8])
-        with open(outfile, 'wb') as g:
-            # ntf file header
-            size_x = btoi(dims[0:4])
-            size_y = btoi(dims[4:8])
-            bytes_arr = [
-                *itob(0),       # ByteOrder: 1 = little endian
-                *itob(1),       # VersionNumber: 1 = Reaktor 5+?
-                *itob(1),       # ArrayFormat: 1 = Float32Bits
-                *itob(1),       # ???
-                *itob(size_x),  # 0x10 dx
-                *itob(size_y),
-                *ftob(0),       # Min = 0.0
-                *ftob(1),       # Max = 1.0
-                *ftob(0),       # 0x20 StepSize = 0.0
-                *ftob(0),       # Default = 0
-                *itob(0),
-                *itob(0),
-                *itob(0),       # 0x30 MinValueColor
-                *itob(0),
-                *itob(0),
-                *ftob(48000),
-                *ftob(120),     # 0x40 X-BPM
-                *ftob(1),
-                *itob(24),
-                *itob(4),
-                *ftob(0),       # 0x50 X-Offset
-                *ftob(1),
-                *ftob(1),
-                *itob(0),
-                *ftob(48),      # 0x60 Y-SamplesPerSecond
-                *ftob(120),
-                *ftob(1),
-                *itob(24),
-                *itob(4),       # 0x70 Y-BeatsPerBar
-                *ftob(0),
-                *ftob(1),
-                *ftob(1),
-            ]
-            g.write(bytearray(bytes_arr))
-
-            big_endian_bytes = f.read(size_x * size_y * 4)
-            data = []
-            for i in range(0, size_x * size_y):
-                data.append(btoi(big_endian_bytes[4*i:4*i+4]))
-            # data = [data[i:i+512] for i in range(0, len(data))]
-            # data = [[data[j][i] for j in range(size_y)] for i in range(size_x)]
-            # final_data = []
-            # for row in data:
-            #     for val in row:
-            #         final_data += itob(val)
-            # final_bytes = bytearray(final_data)
-            # g.write(final_bytes)
-            final_data = []
-            for val in data:
-                final_data += itob(val)
-            g.write(bytearray(final_data))
-
 if __name__ == '__main__':
     import sys
-    infile = sys.argv[1]
-    outfile = f'{infile.rpartition(".")[0]}.ntf'
-    main(infile, outfile)
+    infiles = sys.argv[1:]
+    n = len(infiles)
+    if n == 0:
+        print(f"Usage: {__file__} <jxf_file1> ...")
+        sys.exit(-1)
+    elif n == 1:
+        outfile = f'{infiles[0].rpartition(".")[0]}.ntf'
+    else:
+        outfile = f'{infiles[0].rpartition(".")[0].rpartition("_")[0]}.ntf'
+    main(infiles, outfile, n)
 
 
 """
@@ -141,7 +179,7 @@ Adr   Type   Parameter          Comment
 //     {
 //       Value[y][x]
 //     }
-//   } 
+//   }
 0x80  float  Value[0][0]
       float  Value[0][1]
       float  Value[0][2]
